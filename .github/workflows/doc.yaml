@@ -19,4 +19,4 @@ jobs:
           message-template: |
             ---
             :books:
-            📚 Local Documentation preview test 📚: {docs-pr-index-url}
+            📚 Global Documentation preview test 📚: {docs-pr-index-url}

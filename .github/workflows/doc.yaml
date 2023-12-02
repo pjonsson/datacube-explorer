@@ -16,3 +16,7 @@ jobs:
       - uses: readthedocs/actions/preview@v1
         with:
           project-slug: "datacube-explorer"
+          message-template: |
+            ---
+            :books:
+            📚 Local Documentation preview test 📚: {docs-pr-index-url}

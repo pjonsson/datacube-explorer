@@ -2,8 +2,7 @@ FROM ghcr.io/osgeo/gdal:ubuntu-small-3.8.1 as builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
-    LANG=C.UTF-8 \
-    PYTHONFAULTHANDLER=1
+    LANG=C.UTF-8
 
 # Apt installation
 RUN apt-get update && \

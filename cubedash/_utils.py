@@ -13,9 +13,7 @@ from datetime import datetime, timedelta
 from io import StringIO
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import urljoin, urlparse
-from uuid import UUID
 
-import datacube.drivers.postgres._schema
 import eodatasets3.serialise
 import flask
 import numpy as np
@@ -24,13 +22,10 @@ import shapely.validation
 import structlog
 from affine import Affine
 from datacube import utils as dc_utils
-from datacube.drivers.postgres import _api as pgapi
-from datacube.drivers.postgres._fields import PgDocField
-from datacube.index import Index
 from datacube.index.eo3 import is_doc_eo3
 from datacube.index.fields import Field
 from datacube.model import Dataset, MetadataType, Product, Range
-from datacube.utils import jsonify_document
+from datacube.utils import InvalidDocException, jsonify_document
 from dateutil import tz
 from dateutil.relativedelta import relativedelta
 from eodatasets3 import serialise
@@ -40,8 +35,7 @@ from orjson import orjson
 from pyproj import CRS as PJCRS
 from ruamel.yaml.comments import CommentedMap
 from shapely.geometry import Polygon, shape
-from sqlalchemy import func, select
-from sqlalchemy.engine import Engine
+from sqlalchemy import TIMESTAMP, func
 from werkzeug.datastructures import MultiDict
 
 _TARGET_CRS = "EPSG:4326"
@@ -105,13 +99,44 @@ def expects_eo3_metadata_type(md: MetadataType) -> bool:
     """
     Does the given metadata type expect EO3 datasets?
     """
-    # We don't have a clean way to say that a product expects EO3
+    try:
+        MetadataType.validate_eo3(md.definition)
+        return True
+    except InvalidDocException:
+        return False
 
-    measurements_offset = md.definition["dataset"].get("measurements")
 
-    # In EO3, the measurements are in ['measurments'],
-    # In EO1, they are in ['image', 'bands'].
-    return measurements_offset == ["measurements"]
+def jsonb_doc_expression(md: MetadataType):
+    return md.dataset_fields["metadata_doc"].alchemy_expression
+
+
+def datetime_expression(md_type: MetadataType):
+    """
+    Get an Alchemy expression for a timestamp of datasets of the given metadata type.
+    There is another function sharing the same logic but is for flask template
+    in file: _utils.py function datetime_from_metadata
+    """
+    # If EO3+Stac formats, there's already has a plain 'datetime' field,
+    # So we can use it directly.
+    if expects_eo3_metadata_type(md_type):
+        props = jsonb_doc_expression(md_type)["properties"]
+
+        # .... but in newer Stac, datetime is optional.
+        # .... in which case we fall back to the start time.
+        #      (which I think makes more sense in large ranges than a calculated center time)
+        return (
+            func.coalesce(props["datetime"].astext, props["dtr:start_datetime"].astext)
+            .cast(TIMESTAMP(timezone=True))
+            .label("center_time")
+        )
+
+    # On older EO datasets, there's only a time range, so we take the center time.
+    # (This matches the logic in ODC's Dataset.center_time)
+    time = md_type.dataset_fields["time"].alchemy_expression
+    center_time = (func.lower(time) + (func.upper(time) - func.lower(time)) / 2).label(
+        "center_time"
+    )
+    return center_time
 
 
 def get_dataset_file_offsets(dataset: Dataset) -> Dict[str, str]:
@@ -426,27 +451,28 @@ def dataset_created(dataset: Dataset) -> Optional[datetime]:
             _LOG.warning(
                 "invalid_dataset.creation_dt", dataset_id=dataset.id, value=value
             )
-
+    # like in _dataset_creation_expression, if there's no creation time
+    # then we fall back to indexed time (if it exists)
+    if dataset.indexed_time:
+        return default_utc(dc_utils.parse_time(dataset.indexed_time))
     return None
 
 
-def center_time_from_metadata(dataset: Dataset) -> datetime:
+def datetime_from_metadata(dataset: Dataset) -> datetime:
     """
-    This function shares the same logic as
-    https://github.com/opendatacube/datacube-explorer/blob/4afa0dbbb51d541f377c479e7edb914bdb62aef9/cubedash/summary/_extents.py#L481-L505
+    This function shares similar logic to datetime_expression (above),
+    but retrieves values for the flask template.
+    Get datetime info from metadata_doc rather than Dataset.center_time for EO3
     """
+    # seems to be a misleading name...
     md_type = dataset.metadata_type
     if expects_eo3_metadata_type(md_type):
+        # prefer using datetime or start_datetime directly
         properties = dataset.metadata_doc["properties"]
         t = properties.get("datetime") or properties.get("dtr:start_datetime")
         return default_utc(dc_utils.parse_time(t))
-
-    time = md_type.dataset_fields["time"]
-    try:
-        center_time = time.begin + (time.end - time.begin) / 2
-    except AttributeError:
-        center_time = dataset.center_time
-    return default_utc(center_time)
+    # stick with center time for EO datasets
+    return default_utc(dataset.center_time)
 
 
 def as_rich_json(o):
@@ -771,7 +797,7 @@ def undo_eo3_compatibility(doc):
     if "extent" in doc:
         del doc["extent"]
 
-    lineage = doc.get("lineage")
+    lineage = doc.get("lineage", {})
     # If old EO1-style lineage was built (as it is on dataset.get(include_sources=True),
     # flatten to EO3-style ID lists.
 
@@ -879,150 +905,3 @@ def bbox_as_geom(dataset):
     if dataset.crs is None:
         return None
     return geom.box(*dataset.bounds, crs=dataset.crs).to_crs(geom.CRS(_TARGET_CRS))
-
-
-# ######################### WARNING ############################### #
-#  These functions are bad and access non-public parts of datacube  #
-#     They are kept here in one place for easy criticism.           #
-# ################################################################# #
-
-
-def alchemy_engine(index: Index) -> Engine:
-    # There's no public api for sharing the existing engine (it's an implementation detail of the current index).
-    # We could create our own from config, but there's no api for getting the ODC config for the index either.
-    # pylint: disable=protected-access
-    return index.datasets._db._engine
-
-
-# somewhat misleading name
-def make_dataset_from_select_fields(index, row):
-    # pylint: disable=protected-access
-    return index.datasets._make(row, full_info=True)
-
-
-# pylint: disable=protected-access
-DATASET_SELECT_FIELDS = pgapi._DATASET_SELECT_FIELDS
-
-try:
-    ODC_DATASET_TYPE = datacube.drivers.postgres._schema.PRODUCT
-except AttributeError:
-    # ODC 1.7 and earlier.
-    ODC_DATASET_TYPE = datacube.drivers.postgres._schema.DATASET_TYPE
-
-ODC_DATASET = datacube.drivers.postgres._schema.DATASET
-
-ODC_DATASET_LOCATION = datacube.drivers.postgres._schema.DATASET_LOCATION
-
-try:
-    from datacube.drivers.postgres._core import install_timestamp_trigger
-except ImportError:
-
-    def install_timestamp_trigger(connection):
-        raise RuntimeError(
-            "ODC version does not contain update-trigger installation. "
-            "Cannot install dataset-update trigger."
-        )
-
-
-def get_mutable_dataset_search_fields(
-    index: Index, md: MetadataType
-) -> Dict[str, PgDocField]:
-    """
-    Get a copy of a metadata type's fields that we can mutate.
-
-    (the ones returned by the Index are cached and so may be shared among callers)
-    """
-    return index._db.get_dataset_fields(md.definition)
-
-
-def get_dataset_sources(
-    index: Index, dataset_id: UUID, limit=None
-) -> Tuple[Dict[str, Dataset], int]:
-    """
-    Get the direct source datasets of a dataset, but without loading the whole upper provenance tree.
-
-    This is a lighter alternative to doing `index.datasets.get(include_source=True)`
-
-    A limit can also be specified.
-
-    Returns a source dict and how many more sources exist beyond the limit.
-    """
-    dataset_source = datacube.drivers.postgres._schema.DATASET_SOURCE
-    query = select(
-        dataset_source.c.source_dataset_ref, dataset_source.c.classifier
-    ).where(dataset_source.c.dataset_ref == dataset_id)
-    if limit:
-        # We add one to detect if there are more records after out limit.
-        query = query.limit(limit + 1)
-
-    engine = alchemy_engine(index)
-    with engine.begin() as conn:
-        dataset_classifier = conn.execute(query).fetchall()
-
-        if not dataset_classifier:
-            return {}, 0
-
-        remaining_records = 0
-        if limit and len(dataset_classifier) > limit:
-            dataset_classifier = dataset_classifier[:limit]
-            remaining_records = (
-                conn.execute(
-                    select(func.count())
-                    .select_from(dataset_source)
-                    .where(dataset_source.c.dataset_ref == dataset_id)
-                ).scalar()
-                - limit
-            )
-
-    classifier = dict(dataset_classifier)
-    return {
-        classifier[d.id]: d
-        for d in (
-            index.datasets.bulk_get(dataset_id for dataset_id, _ in dataset_classifier)
-        )
-    }, remaining_records
-
-
-def get_datasets_derived(
-    index: Index, dataset_id: UUID, limit=None
-) -> Tuple[List[Dataset], int]:
-    """
-    this is similar to ODC's connection.get_derived_datasets() but allows a
-    limit, and will return a total count.
-    """
-    dataset_source = datacube.drivers.postgres._schema.DATASET_SOURCE
-    query = (
-        select(*DATASET_SELECT_FIELDS)
-        .select_from(
-            ODC_DATASET.join(
-                dataset_source, ODC_DATASET.c.id == dataset_source.c.dataset_ref
-            )
-        )
-        .where(dataset_source.c.source_dataset_ref == dataset_id)
-    )
-    if limit:
-        # We add one to detect if there are more records after out limit.
-        query = query.limit(limit + 1)
-
-    engine = alchemy_engine(index)
-    with engine.begin() as conn:
-        remaining_records = 0
-        total_count = 0
-        datasets = conn.execute(query).fetchall()
-
-        if limit and len(datasets) > limit:
-            datasets = datasets[:limit]
-            total_count = conn.execute(
-                select(func.count())
-                .select_from(
-                    ODC_DATASET.join(
-                        dataset_source, ODC_DATASET.c.id == dataset_source.c.dataset_ref
-                    )
-                )
-                .where(dataset_source.c.source_dataset_ref == dataset_id)
-            ).scalar()
-            remaining_records = total_count - limit
-
-    return [
-        make_dataset_from_select_fields(index, dataset) for dataset in datasets
-    ], remaining_records

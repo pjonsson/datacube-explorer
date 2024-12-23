@@ -69,7 +69,7 @@ def legacy_product_audit_page():
 @bp.route("/audit/datasets-metadata")
 def datasets_metadata_page():
     store = _model.STORE
-    all_products = {p.name for p in store.index.products.get_all()}
+    all_products = {p.name for p in store.all_products()}
     summarised_products = set(store.list_complete_products())
     unsummarised_product_names = all_products - summarised_products
 

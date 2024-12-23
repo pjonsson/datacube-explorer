@@ -69,7 +69,7 @@ DEFAULT_GROUPING_TIMEZONE = DEFAULT_TIMEZONE
 # As long as we don't run queries (ie. open db connections) before forking
 # (hence validate=False).
 STORE: SummaryStore = SummaryStore.create(
-    index_connect(application_name=NAME, validate_connection=False),
+    index=index_connect(application_name=NAME, validate_connection=False),
     grouping_time_zone=DEFAULT_TIMEZONE,
 )
 

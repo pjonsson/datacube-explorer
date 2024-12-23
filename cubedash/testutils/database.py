@@ -9,14 +9,15 @@ import psycopg2
 import psycopg2.extensions
 import pytest
 from datacube import Datacube
+from datacube.cfg import ODCConfig, ODCEnvironment
+from datacube.drivers.postgis import _core as pgis_core
 from datacube.drivers.postgres import _core as pgres_core
 from datacube.index import index_connect
 from datacube.index.hl import Doc2Dataset
 from datacube.model import MetadataType
 from datacube.utils import read_documents
+from datacube.utils.documents import InvalidDocException, UnknownMetadataType
 from sqlalchemy import text
-
-from cubedash import _utils
 
 GET_DB_FROM_ENV = "get-the-db-from-the-environment-variable"
 
@@ -34,8 +35,9 @@ def postgresql_server():
 
     # If we're running inside docker already, don't attempt to start a container!
     # Hopefully we're using the `with-test-db` script and can use *that* database.
+    # I think this may be copypasta from odc-tools
     if Path("/.dockerenv").exists() and (
-        "ODC_DEFAULT_DB_URL" in os.environ or "DB_DATABASE" in os.environ
+        "ODC_DEFAULT_DB_URL" in os.environ or "ODC_POSTGIS_DB_URL" in os.environ
     ):
         yield GET_DB_FROM_ENV
     else:
@@ -101,6 +103,8 @@ def odc_db(postgresql_server, tmp_path_factory, request):
         )
         config = configparser.ConfigParser()
         config["default"] = postgresql_server
+        postgresql_server["index_driver"] = "postgis"
+        config["postgis"] = postgresql_server
         with open(temp_datacube_config_file, "w", encoding="utf8") as fout:
             config.write(fout)
         # Use pytest.MonkeyPatch instead of the monkeypatch fixture
@@ -115,15 +119,26 @@ def odc_db(postgresql_server, tmp_path_factory, request):
         mp.undo()
 
 
+@pytest.fixture(scope="module", params=["default", "postgis"])
+def env_name(request) -> str:
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def odc_test_db(odc_db, request):
+def cfg_env(odc_db, env_name) -> ODCEnvironment:
+    """Provides a :class:`ODCEnvironment` configured with suitable config file paths."""
+    return ODCConfig()[env_name]
+
+
+@pytest.fixture(scope="module")
+def odc_test_db(cfg_env):
     """
     Provide a temporary PostgreSQL server initialised by ODC, usable as
     the default ODC DB by setting environment variables.
     :return: Datacube instance
     """
 
-    index = index_connect(validate_connection=False)
+    index = index_connect(cfg_env, validate_connection=False)
     index.init_db()
 
     dc = Datacube(index=index)
@@ -131,27 +146,47 @@ def odc_test_db(odc_db, request):
     # Disable PostgreSQL Table logging. We don't care about storage reliability
     # during testing, and need any performance gains we can get.
 
-    engine = _utils.alchemy_engine(index)
-    with engine.begin() as conn:
-        for table in [
-            "agdc.dataset_location",
-            "agdc.dataset_source",
-            "agdc.dataset",
-            "agdc.dataset_type",
-            "agdc.metadata_type",
-        ]:
-            conn.execute(text(f"alter table {table} set unlogged"))
+    with index._db._engine.begin() as conn:
+        if index.name == "pg_index":
+            for table in [
+                "agdc.dataset_location",
+                "agdc.dataset_source",
+                "agdc.dataset",
+                "agdc.dataset_type",
+                "agdc.metadata_type",
+            ]:
+                conn.execute(text(f"alter table {table} set unlogged"))
 
-        yield dc
+            yield dc
 
-        dc.close()
+            dc.close()
 
-        # This actually drops the schema, not the DB
-        pgres_core.drop_db(conn)  # pylint:disable=protected-access
+            # This actually drops the schema, not the DB
+            pgres_core.drop_db(conn)  # pylint:disable=protected-access
 
-        # We need to run this as well, I think because SQLAlchemy grabs them into it's MetaData,
-        # and attempts to recreate them.
-        _remove_postgres_dynamic_indexes()
+            # We need to run this as well, I think because SQLAlchemy grabs them into it's MetaData,
+            # and attempts to recreate them.
+            _remove_postgres_dynamic_indexes()
+        else:
+            for table in [
+                "odc.dataset_lineage",
+                "odc.dataset_search_string",
+                "odc.dataset_search_num",
+                "odc.dataset_search_datetime",
+                "odc.spatial_indicies",
+                "odc.spatial_4326",
+                "odc.dataset",
+                "odc.product",
+                "odc.metadata_type",
+            ]:
+                conn.execute(text(f"alter table {table} set unlogged"))
+            yield dc
+
+            dc.close()
+
+            pgis_core.drop_db(conn)  # pylint:disable=protected-access
+
+            _remove_postgis_dynamic_indexes()
 
 
 def _remove_postgres_dynamic_indexes():
@@ -163,6 +198,16 @@ def _remove_postgres_dynamic_indexes():
         table.indexes.intersection_update(
             [i for i in table.indexes if not i.name.startswith("dix_")]
         )
+
+
+def _remove_postgis_dynamic_indexes():
+    """
+    Clear any dynamically created postgis indexes from the schema.
+    """
+    # Our normal indexes start with "ix_", dynamic indexes with "dix_"
+    # for table in pgis_core.METADATA.tables.values():
+    #    table.indexes.intersection_update([i for i in table.indexes if not i.name.startswith('dix_')])
+    # Dynamic indexes disabled.
 
 
 @pytest.fixture(scope="module")
@@ -189,13 +234,20 @@ def auto_odc_db(odc_test_db, request):
         for filename in request.module.METADATA_TYPES:
             filename = data_path / filename
             for _, meta_doc in read_documents(filename):
-                odc_test_db.index.metadata_types.add(MetadataType(meta_doc))
+                try:
+                    odc_test_db.index.metadata_types.add(MetadataType(meta_doc))
+                except InvalidDocException:
+                    # skip non-eo3 metadata/products/datasets when using the postgis index
+                    continue
 
     if hasattr(request.module, "PRODUCTS"):
         for filename in request.module.PRODUCTS:
             filename = data_path / filename
             for _, prod_doc in read_documents(filename):
-                odc_test_db.index.products.add_document(prod_doc)
+                try:
+                    odc_test_db.index.products.add_document(prod_doc)
+                except UnknownMetadataType:
+                    continue
 
     dataset_count = Counter()
     if hasattr(request.module, "DATASETS"):
@@ -204,13 +256,16 @@ def auto_odc_db(odc_test_db, request):
             filename = data_path / filename
             for _, doc in read_documents(filename):
                 label = doc["ga_label"] if ("ga_label" in doc) else doc["id"]
-                dataset, err = create_dataset(
-                    doc, f"file://example.com/test_dataset/{label}"
-                )
-                assert dataset is not None, err
-                created = odc_test_db.index.datasets.add(dataset)
-                assert created.uri
-                dataset_count[created.product.name] += 1
+                try:
+                    dataset, err = create_dataset(
+                        doc, f"file://example.com/test_dataset/{label}"
+                    )
+                    assert dataset is not None, err
+                    created = odc_test_db.index.datasets.add(dataset)
+                    assert created.uri
+                    dataset_count[created.product.name] += 1
+                except ValueError:
+                    continue
 
             print(f"Loaded Datasets: {dataset_count}")
     return dataset_count

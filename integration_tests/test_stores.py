@@ -72,7 +72,9 @@ def test_add_period_list():
     total = TimePeriodOverview.add_periods([])
     assert total.dataset_count == 0
 
-    joined = TimePeriodOverview.add_periods([_overview(), _overview(), total])
+    # the application of footprint_tolerance 1000.0 in _create_unified_footprint causes the geometries
+    # and therefore their areas to diverge. Not sure why this wasn't an issue before?
+    joined = TimePeriodOverview.add_periods([_overview(), _overview(), total], 0.0)
     assert joined.dataset_count == _overview().dataset_count * 2
     assert _overview().footprint_geometry.area == pytest.approx(
         joined.footprint_geometry.area
@@ -166,8 +168,9 @@ def test_get_null(summary_store: SummaryStore):
     assert loaded is None
 
 
-def test_srid_lookup(summary_store: SummaryStore):
-    assert summary_store.grouping_crs == "EPSG:3577"
+# this logic has been moved to the schema
+# def test_srid_lookup(summary_store: SummaryStore):
+#     assert summary_store.grouping_crs == "EPSG:3577"
 
 
 def test_put_get_summaries(summary_store: SummaryStore):
@@ -244,7 +247,7 @@ def test_generate_empty(run_generate):
     run_generate()
 
 
-def test_generate_raises_error(run_generate):
+def test_generate_raises_error(run_generate, empty_client):
     """
     generate should return an error when an unknown product is asked for explicitly.
     """
@@ -253,3 +256,4 @@ def test_generate_raises_error(run_generate):
         f"Command should return an error when unknown products are specified. "
         f"Output: {result.output}"
     )
+    assert "fake_product" in result.output

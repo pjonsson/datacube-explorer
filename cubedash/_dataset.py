@@ -37,8 +37,8 @@ def dataset_page(id_):
 def dataset_full_page(product_name: str, id_: UUID):
     derived_dataset_overflow = source_dataset_overflow = 0
 
-    index = _model.STORE.index
-    dataset = index.datasets.get(id_, include_sources=False)
+    store = _model.STORE
+    dataset = store.index.datasets.get(id_, include_sources=False)
 
     if dataset is None:
         abort(404, f"No dataset found with id {id_}")
@@ -59,19 +59,19 @@ def dataset_full_page(product_name: str, id_: UUID):
     provenance_display_limit = current_app.config.get(
         "CUBEDASH_PROVENANCE_DISPLAY_LIMIT", PROVENANCE_DISPLAY_LIMIT
     )
-    source_datasets, source_dataset_overflow = utils.get_dataset_sources(
-        index, id_, limit=provenance_display_limit
+    source_datasets, source_dataset_overflow = store.e_index.get_dataset_sources(
+        id_, limit=provenance_display_limit
     )
 
     dataset.metadata.sources = {}
     ordered_metadata = utils.prepare_dataset_formatting(dataset)
 
-    derived_datasets, derived_dataset_overflow = utils.get_datasets_derived(
-        index, id_, limit=provenance_display_limit
+    derived_datasets, derived_dataset_overflow = store.e_index.get_datasets_derived(
+        id_, limit=provenance_display_limit
     )
     derived_datasets.sort(key=utils.dataset_label)
 
-    footprint, region_code = _model.STORE.get_dataset_footprint_region(id_)
+    footprint, region_code = store.get_dataset_footprint_region(id_)
     # We only have a footprint in the spatial table above if summarisation has been
     # run for the product (...and done so after the dataset was added).
     #

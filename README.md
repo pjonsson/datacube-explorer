@@ -81,8 +81,6 @@ with [pyflakes](https://github.com/PyCQA/pyflakes).
 
 They are included when installing the test dependencies:
 
-    pip install --upgrade --no-deps --extra-index-url https://packages.dea.ga.gov.au/ 'datacube' 'digitalearthau'
-
     pip install -e .[test]
 
 Run `make lint` to check your changes, and `make format` to format your code
@@ -118,11 +116,11 @@ version uses virtualenvs which are incompatible with Conda's environments)
 
 Set ODC's environment variable before running the server:
 
-    export DATACUBE_ENVIRONMENT=staging
+    export ODC_ENVIRONMENT=staging
 
 You can always see which environment/settings will be used by running `datacube system check`.
 
-See the ODC documentation for config and [datacube environments](https://datacube-core.readthedocs.io/en/latest/user/config.html#runtime-config)
+See the ODC documentation for [datacube configuration and environments](https://opendatacube.readthedocs.io/en/latest/installation/database/configuration.html)
 
 ### How can I set different timezone
 
@@ -218,8 +216,8 @@ Three roles are created:
 - **explorer-generator**: Suitable for generating and updating summaries (ie. Running `cubedash-gen`)
 - **explorer-owner**: For creating and updating the schema. (ie. Running `cubedash-gen --init`)
 
-Note that these roles extend the built-in datacube role `agdc_user`. If you
-created your datacube without permissions, a stand-alone creator of the `agdc_user`
+Note that these roles extend the built-in datacube role `agdc_user` (using postgres) or `odc_user` (using postgis).
+If you created your datacube without permissions, a stand-alone creator of the appropriate
 role is available as a prerequisite in the same [roles](cubedash/summary/roles)
 directory.
 

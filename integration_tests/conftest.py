@@ -10,7 +10,7 @@ from datacube import Datacube
 from flask.testing import FlaskClient
 from structlog import DropEvent
 
-from cubedash import _model, _utils, create_app, generate, logs
+from cubedash import _model, create_app, generate, logs
 from cubedash.summary import SummaryStore
 from cubedash.summary._schema import METADATA as CUBEDASH_METADATA
 from cubedash.warmup import find_examples_of_all_public_urls
@@ -41,9 +41,7 @@ def summary_store(odc_test_db: Datacube) -> SummaryStore:
         # Some CRS/storage tests use test data that is 3577
         store.init(grouping_epsg_code=3577)
 
-    _make_all_tables_unlogged(
-        _utils.alchemy_engine(odc_test_db.index), CUBEDASH_METADATA
-    )
+    _make_all_tables_unlogged(odc_test_db.index, CUBEDASH_METADATA)
     return store
 
 
@@ -55,9 +53,10 @@ def _init_logs(pytestconfig):
 
 
 @pytest.fixture()
-def clirunner():
+def clirunner(env_name: str):
     def _run_cli(cli_method, opts, catch_exceptions=False, expect_success=True):
         runner = CliRunner()
+        opts += ("--env", env_name)
         result = runner.invoke(cli_method, opts, catch_exceptions=catch_exceptions)
         if expect_success:
             assert (
@@ -138,7 +137,7 @@ def disable_logging():
 @pytest.fixture()
 def client(unpopulated_client: FlaskClient) -> FlaskClient:
     with disable_logging():
-        for product in _model.STORE.index.products.get_all():
+        for product in _model.STORE.all_products():
             _model.STORE.refresh(product.name)
 
     return unpopulated_client
@@ -164,7 +163,7 @@ def pytest_assertrepr_compare(op, left, right):
         return format_doc_diffs(left, right)
 
 
-def _make_all_tables_unlogged(engine, metadata: sqlalchemy.MetaData):
+def _make_all_tables_unlogged(index, metadata: sqlalchemy.MetaData):
     """
     Set all tables in this alchemy metadata to unlogged.
 
@@ -177,7 +176,7 @@ def _make_all_tables_unlogged(engine, metadata: sqlalchemy.MetaData):
             # Not supported for materialised views.
             continue
         else:
-            with engine.begin() as conn:
+            with index._active_connection() as conn:
                 conn.execute(
                     sqlalchemy.text(
                         f"""alter table {table.selectable.fullname} set unlogged;"""

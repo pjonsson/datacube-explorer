@@ -6,7 +6,7 @@ write_to = "cubedash/_version.py"
 
 [tool.black]
 line-length = 88
-target_version = ['py310', 'py311', 'py312']
+target_version = ['py310', 'py311', 'py312', 'py313]
 include = '\.pyi?$'
 exclude = '''
 /(
@@ -25,7 +25,7 @@ exclude = '''
 '''
 
 [tool.ruff]
-target-version = "py38"
+target-version = "py310"
 
 [tool.ruff.lint]
 # Which checkers to enable?

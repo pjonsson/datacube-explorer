@@ -76,7 +76,7 @@ setup(
         "click",
         "datacube[postgres]>=1.9.0",
         "eodatasets3>=1.9",
-        "fiona",
+        "fiona>=1.10.0",
         "flask",
         "Flask-Caching",
         "flask-cors",
